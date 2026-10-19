@@ -1,14 +1,14 @@
-# MES 지속 학습 안전장치: 미래 라벨 누수 방지 피처 + 재학습 안전 게이트
+# MES 입고 처리 판정: V5 학습 파이프라인 + 지속 학습 안전장치
 
-부품 입고 처리 판정(PROCESS / RETURN / REPAIR) 모델을 운영 중에 다시 학습할 때, **미래 정보 누수**와 **특정 고객사에서만 나빠지는 모델 교체**를 막는 핵심 ML 로직입니다.
+부품 입고 이력(MES)으로 처리 판정(PROCESS / RETURN / REPAIR)을 자동화한 **V5 학습 파이프라인 전체**(`v5_pipeline/`)와, 이를 운영 중에 안전하게 다시 학습하기 위한 **미래 정보 누수 방지 피처·재학습 안전 게이트**(`mes_cl/`)를 담은 저장소입니다.
 
 ## 한눈에 보기
 
 - **문제**: 처리 결과(라벨)는 입고 후 며칠~몇 주 뒤에 확정됩니다. 이를 무시하고 학습하면 오프라인 점수만 좋고 운영에서는 무너지며, 평균 개선만 보고 모델을 바꾸면 일부 고객사에서 위험한 오판정이 늘 수 있습니다.
 - **접근**: (1) 라벨 *확정일* 기준으로 "그 시점에 알 수 있던 정보"만 쓰는 피처·라벨 파이프라인, (2) 같은 평가 행에서 기준 모델과 후보 모델을 고객사 단위로 비교하는 안전 게이트.
-- **결과물**: `mes_cl/` 패키지(라벨 인덱스, 시계열·도메인 피처, 게이트), 합성 데이터 생성기, end-to-end `demo.py`, pytest 테스트 12개.
-- **기술 스택**: Python 3.10+, numpy, scipy (테스트: pytest). 데모 모델도 numpy로 직접 구현해 외부 ML 프레임워크가 필요 없습니다.
-- **포함 / 미포함**: 피처·게이트 로직과 합성 데이터만 포함. 실제 데이터, 학습된 모델, 대시보드·API·DB·배포 설정은 포함하지 않습니다.
+- **결과물**: `v5_pipeline/` (입력 계약 → 룰 기준선 → 회사·라인 계층형 ML → Green → 위험 앙상블·guard → 동결·봉인·감사, 75개 모듈) + `mes_cl/` 패키지(라벨 인덱스, 시계열·도메인 피처, 게이트), 합성 데이터 생성기, end-to-end `demo.py`, pytest 테스트.
+- **기술 스택**: Python 3.10+, numpy, scipy · V5 파이프라인: scikit-learn(TF-IDF, 선형 모델), LightGBM, openpyxl · 테스트: pytest
+- **포함 / 미포함**: 학습·선택·안전장치·봉인 코드와 합성 데이터만 포함. 실제 데이터, 학습된 모델과 동결 산출물, 고객사별 룰 마이닝 엔진, 대시보드·API·DB·배포 설정은 포함하지 않습니다.
 
 ## 왜 필요한가
 
@@ -52,6 +52,46 @@
 - **표본 부족 = 판단 보류**: 행 수나 라벨별 건수가 기준 미만인 그룹은 "안전"으로 보지 않습니다.
 - **승격은 사람 몫**: 게이트는 같은 cohort 검증일 뿐이며, 운영 적용에는 전향적 근거와 사람 승인이 필요합니다.
 
+## V5 학습 파이프라인 (`v5_pipeline/`)
+
+과거 처리 결과의 분포, 업무 규칙, 텍스트·구조 ML을 함께 쓰는 **하이브리드 판정 엔진**입니다.
+과거 기간에서 만든 분포·모델·정책을 하나의 "세대(generation)"로 **동결**하고, 신규 행은 그 동결본으로만 예측한 뒤 결과를 봉인합니다.
+실제 결과(라벨)는 예측이 끝난 뒤 별도 파일로만 감사(audit)에 쓰입니다.
+
+```text
+입력 계약 ─▶ 룰 기준선 ─▶ 회사·라인 계층형 ML ─▶ Green ─▶ 위험 앙상블 + 수리 guard ─▶ 무반례 회수 ─▶ 봉인 ─▶ 감사
+ (A)          (Loop93,     (C·D)                   (E)       (E)                          (E)           (F)      (F)
+              미포함)
+```
+
+| 단계 | 하는 일 | 주요 모듈 |
+|---|---|---|
+| **A. 입력 계약** | 입고 시점에 알 수 있는 필드만 허용. 사후 필드(처리 결과, 대기 여부, 고객 의견)가 채워진 입력은 지우지 않고 **입력 자체를 거부**(fail-closed). 기준일은 발생일 → 등록일 순 | `src/data_contract.py`, `src/shadow_validation/input_contract.py`, `src/runtime_contract.py` |
+| **B. 피처** | 필드별 단어(1~2gram)·문자(3~5gram) TF-IDF, 의미 태그, 횟수 차이·비율, 결측, 과거 분포(학습은 월별 expanding OOF, 추론은 동결 이력) | `src/features.py`, `src/temporal_features.py`, `src/v4_domain_features.py`, `experiment_lib/` |
+| **룰 기준선 (Loop93)** | 과거 분포 룰만으로 만든 깨끗한 기준 판정. **고객사별 마이닝 룰이라 공개본에서 제외**하고 연결부(`loop93.py`)만 남김 | `src/shadow_validation/loop93.py` |
+| **C. 회사·라인 계층형 ML** | 전사 → 회사 → 회사×라인 순서로 적용할 후보를 선택. 전사 모델(공투 이진 2종, 다중분류 LightGBM, temporal signature)과 주요 고객사 전용 모델(선형 + LightGBM)을 함께 운용 | `src/hierarchy.py`, `src/hierarchical_*.py`, `src/company_*.py`, `src/robust_company_allocator.py` |
+| **D. 후보 학습·선택** | 후보 학습(선형 OVR, LightGBM OVR, temporal signature), 임계값 적합, 선택 기간에서 정책 선택 후 lockbox로 검증, 위험 예산·정확도 하한 조건 | `src/candidates.py`, `src/binary_candidates.py`, `src/thresholds.py`, `src/select.py`, `src/power_selector.py`, `src/rolling_validation.py`, `src/risk_budget_optimizer.py` |
+| **E. Green · 안전장치** | V4 아이디어를 재구성한 Green 판정(action별 독립 head) → 공투로 승인된 행만 **3-seed LightGBM 위험 앙상블**로 재검사 → 좁고 강한 수리 신호 **guard** → 과거 반례가 0건인 좁은 패턴만 공투로 **회수**(guard가 내린 행은 보호) | `src/v4_*.py`, `experiment_lib/point_in_time_danger_veto.py`(위험 head 학습·보정), `src/rank_based_danger_veto.py`, `src/prior_supported_repair_guard.py`, `src/prior_supported_process_recovery.py`, `src/hierarchical_veto.py` |
+| **F. 동결·봉인·감사** | 정책·모델·이력을 SHA-256으로 묶어 세대로 동결, 예측 결과와 입력을 receipt로 봉인, 확정 라벨이 생긴 뒤 별도 감사 리포트(회사·월·오검 방향별) | `src/freeze.py`, `src/shadow_validation/{receipt,integrity,predictor,audit,report}.py` |
+| **G. 실행 스크립트** | 후보 frontier 탐색, 계층 lockbox 감사, 정책 materialize, 세대 동결, shadow 예측·감사 | `scripts/*.py` |
+
+**설계 원칙**
+
+- **판정을 올리는 단계와 내리는 단계를 분리**: 안전장치(위험 앙상블, guard, semantic veto)는 PROCESS → REVIEW로 *내리기만* 하고, 회수 단계만 좁은 조건에서 PROCESS로 올립니다.
+- **선택과 평가의 시간 분리**: 후보·임계값은 선택 기간에서 정하고 동결하며, 이후 lockbox·shadow 기간에서는 다시 탐색하지 않습니다.
+- **재현성**: 세대의 모든 입력·모델·정책 파일을 해시로 고정하고, 해시가 다르면 실행을 거부합니다.
+
+<details>
+<summary>공개본에서 V5 코드에 적용한 익명화</summary>
+
+- MES 컬럼명과 판정 라벨을 일반 이름으로 변경 (예: 처리 결과 → `action_result`, 횟수 필드 → `intake_count` / `service_count` / `treatment_count`, 사용 시간 → `usage_hours`, 라벨 → `PROCESS` / `RETURN` / `REPAIR` / `REVIEW`).
+- 고객사 표기 정규화 규칙은 코드에서 삭제하고 빈 설정값(`CUSTOMER_ALIASES`)으로 교체. 고객사 키는 `customer_a` ~ `customer_e`.
+- 의미 태그·guard·veto의 현장 키워드 정규식은 같은 group id를 유지한 채 예시 어휘로 교체 (원본과 매칭 결과가 다릅니다).
+- 로컬 경로는 `artifacts/...` placeholder로 변경. 튜닝된 임계값·가중치 상수는 원본 그대로입니다.
+- 제외: Loop93 룰 마이닝 엔진과 실행기, `frozen/` 산출물 전체(모델, 고객사별 이력, 행 단위 정책), 운영 결과와의 parity 검사.
+
+</details>
+
 ## 데모 결과
 
 합성 데이터 6,000행(2026-04-01 이후 `line_3`에 위험도 상승 주입)으로 재학습 한 사이클을 돌린 실제 출력입니다 (`python3 demo.py`, 기본값 `--rows 6000 --seed 0`, 일부 생략).
@@ -82,8 +122,15 @@ gate passed: False | production_eligible: False
 ```bash
 pip install -r requirements.txt pytest
 python3 demo.py                                # 약 2초
-python3 -m pytest -q -p no:cacheprovider       # 12 passed
+python3 -m pytest -q -p no:cacheprovider tests/test_*.py   # mes_cl: 12 passed
+
+# V5 파이프라인 smoke 테스트 (scikit-learn, LightGBM 필요)
+pip install -r requirements-v5.txt
+python3 -m pytest -q -p no:cacheprovider       # 전체: 65 passed
 ```
+
+`v5_pipeline` 모듈을 직접 import 할 때는 `v5_pipeline/`을 `sys.path` 앞에, `v5_pipeline/src`는 **맨 뒤에** 붙여야 합니다
+(`src/select.py`가 표준 라이브러리 `select`를 가리지 않도록). `tests/v5/conftest.py`가 이 설정을 보여줍니다.
 
 ```python
 from mes_cl.labels import LabelAvailabilityIndex
@@ -115,6 +162,10 @@ gate["passed"], gate["production_eligible"]   # (True, False)
 
 ```text
 industrial-mes-continual-learning/
+├── v5_pipeline/             # V5 학습 파이프라인 (익명화 원본 코드, 75개 모듈)
+│   ├── src/                 # A~F 단계 모듈 (shadow_validation/ = 동결 추론·봉인·감사)
+│   ├── scripts/             # G 단계 실행 스크립트
+│   └── experiment_lib/      # point-in-time 라벨·피처 원형 (mes_cl 과 같은 계열)
 ├── mes_cl/
 │   ├── labels.py            # 라벨 가용성 인덱스, cutoff별 receipt
 │   ├── temporal.py          # 범위·기간별 라벨 이력, serial 재입고 피처
@@ -122,7 +173,8 @@ industrial-mes-continual-learning/
 │   ├── gate.py              # 기준 vs 후보 같은-cohort 안전 게이트
 │   └── synthetic.py         # 합성 MES 이력 생성기
 ├── demo.py                  # end-to-end 재학습 사이클 데모
-└── tests/                   # 누수 방지 7개 + 게이트 규칙 5개 테스트
+├── requirements-v5.txt     # v5_pipeline 의존성 (scikit-learn, LightGBM, openpyxl)
+└── tests/                   # mes_cl 테스트 12개 + v5/ 단계별 smoke 테스트 53개
 ```
 
 ## 기술 상세
@@ -161,10 +213,12 @@ industrial-mes-continual-learning/
 - 원본은 판정 분석·모니터링 대시보드, PostgreSQL 이력 저장소, 학습 워커, 승인·롤백 관리를 포함한 내부 플랫폼이며, 여기에는 재현 가능한 ML 핵심만 떼어냈습니다.
 - 필드명·판정 라벨을 일반화했습니다 (`action_result`, `intake_count`, `usage_hours`, `PROCESS / RETURN / REPAIR` 등).
 - 텍스트 의미 패턴은 현장 용어 대신 예시 어휘로 바꿨습니다 (키 이름이 feature 이름이므로 현장 적용 시 어휘만 교체).
-- 동결 룰 엔진, 고객사·라인 보정, 학습된 모델, 운영 이력은 포함하지 않습니다.
+- V5 파이프라인 코드는 위 "익명화" 항목대로 바꿔 넣었고, 동결 룰 엔진(Loop93), 학습된 모델, 고객사별 이력·정책 산출물, 운영 이력은 포함하지 않습니다.
 
 ## 한계
 
+- `v5_pipeline/`은 실제 데이터·설정 파일·동결 산출물이 있어야 전체가 돌아갑니다. 공개본에서는 합성 데이터로 A~F 단계별 대표 함수만 smoke 테스트합니다 (`tests/v5/`, 53개). 원본 성능 재현은 불가능합니다.
+- 룰 기준선(Loop93)이 빠져 있어 `scripts/predict_shadow.py` 같은 동결 추론 경로는 그대로 실행되지 않습니다.
 - 데모 수치는 모두 합성 데이터에서 나온 값이며, 실제 운영 성능을 나타내지 않습니다.
 - 데모 모델은 의존성을 줄이기 위한 numpy 다항 로지스틱 회귀(최대 확률 0.55 미만은 REVIEW)이고, 데모의 기준 모델도 동결 룰이 아니라 오래된 cutoff로 학습한 같은 모델입니다.
 - 게이트는 같은 cohort에서의 오프라인 비교만 합니다. 전향적(prospective) 검증, 승인 절차, 롤백은 이 저장소 범위 밖입니다.
