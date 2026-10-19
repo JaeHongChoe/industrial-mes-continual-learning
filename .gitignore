@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.DS_Store
+
+# 실제 MES 데이터·모델·실행 산출물은 커밋하지 않는다
+data/
+outputs/
+artifacts/
+*.csv
+*.xlsx
+*.jsonl
+*.jsonl.gz
+*.pkl
+*.joblib
+*.dump
