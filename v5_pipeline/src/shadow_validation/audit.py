@@ -219,7 +219,7 @@ def _load_predictions(path: Path, sealed_ids: tuple[str, ...]) -> Mapping[str, M
 
 def _label_action(row: InputRow) -> str | None:
     value = row.raw.get("action_result", "")
-    if canonical_field_name(value) in {"", "미기재", "na", "없음", "UNCONFIRMED"}:
+    if canonical_field_name(value) in {"", "미기재", "na", "없음", "unconfirmed"}:
         return None
     try:
         return normalize_action_label(value)

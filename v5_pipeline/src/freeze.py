@@ -364,7 +364,7 @@ def _read_state(path: Path) -> dict[str, Any]:
 
 
 def _reject_audit_derived_payload(value: Any, path: str) -> None:
-    forbidden_tokens = ("audit", "2026", "actual", "action_result", "on_hold", "customer_comment")
+    forbidden_tokens = ("audit", "2026", "actual", "actionresult", "onhold", "customercomment")
     if isinstance(value, Mapping):
         for key, nested in value.items():
             canonical = str(key).replace("_", "").replace("-", "").lower()

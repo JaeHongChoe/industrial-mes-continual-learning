@@ -282,11 +282,14 @@ def _canonicalize_row(raw: Mapping[str, Any]) -> dict[str, Any]:
     return output
 
 
+_POST_DECISION_CANONICAL = frozenset(canonical_field_name(name) for name in POST_DECISION_FIELDS)
+
+
 def _nonblank_postdecision_values(row: Mapping[str, Any]) -> dict[str, str]:
     output: dict[str, str] = {}
     for key, value in row.items():
         canonical = canonical_field_name(key)
-        if canonical in POST_DECISION_FIELDS and _scalar_text(value):
+        if canonical in _POST_DECISION_CANONICAL and _scalar_text(value):
             output[_FIELD_BY_CANONICAL.get(canonical, key)] = _scalar_text(value)
     return output
 
